@@ -14,10 +14,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="ASO DIGITALIZADO - NATALIA RIBEIRO DOS SANTOS ADM 131125.pdf">
+    <None Update="teste-ASO _DIGITALIZADO_AUGUSTO CARLOS RIBEIRO_PER_12112025.pdf">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Update="ASO DIGITALIZADO- EDESIO FERREIRA BARBOSA RT 171125.pdf">
+    <None Update="teste-ASO_DIGITALIZADO_BRUNO SOARES DE JESUS_DEM 31102025.pdf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="teste-PRONTUARIO_DIGITALIZADO_EDIVAN BONFIM SANTOS_ADM 10112025.pdf">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Update="tessdata\por.traineddata">

@@ -1,25 +1,51 @@
 ﻿using System.Text;
 using System.Text.RegularExpressions;
 using UglyToad.PdfPig;
-using Tesseract; // Necessário instalar o pacote NuGet: Tesseract
+using Tesseract;
 
 namespace RenomeadorPDF
 {
     class Program
     {
-
-        private static readonly string[] identificadoresPdfValidos = { "ASO", "ATESTADO DE SAÚDE OCUPACIONAL" };
+        // ASO- ATESTADO DE SAÚDE
+        private static readonly string[] _identificadoresPdfValidos = { "ASO", "ATESTADO DE SAÚDE OCUPACIONAL" };
+        // Identificadores execos ASO Ocupacional 
+        private static readonly string[] _identificadoresAsoValidas = { "Ocupacional" };
 
         // Configure o caminho para a pasta tessdata (onde ficam os arquivos de linguagem do OCR)
         // Baixe o arquivo 'por.traineddata' ou 'eng.traineddata' e coloque numa pasta "tessdata" junto com o executável
         private static readonly string TessDataPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tessdata");
         private static readonly string Language = "por"; // 'por' para português, 'eng' para inglês
+        private static readonly string _TIPO_ASO_INDEFINIDO = "TIPO-INDEFINIDO";
+        private static readonly string _SEM_DATA = "SEMDATA";
+        private static readonly bool showLog = true;
+
+        // 2. DEFINIÇÃO DOS GATILHOS (Onde começa e onde termina o nome)
+        // Palavras que indicam que o nome vem a seguir
+        private static readonly string _gatilhosInicio = @"(Empregado|Funcionário|Nome:|Colaborador|TRABALHADOR Nome|Paciente)";
+
+        // Palavras que indicam que o nome acabou (o que costuma vir depois do nome no ASO)
+        // \d+ pega qualquer número (como idade, matrícula ou CPF começando)
+        // M\s pega "M " de matrícula
+        private static readonly string _gatilhosFim = @"(Deptosetor|SEXO|SEQUENCIAL|Depto|Setor|Cargo|CPF|RG|CNPJ|Data|Nasc|Idade|M\s|\d|CBO|SEXO|Código|Código /Matrícula)";
+
+        private static string getFatherCurrentDirectory()
+        {
+            // Obtém o caminho base do AppDomain (onde o executável está rodando)
+            string caminhoDoExecutavel = AppDomain.CurrentDomain.BaseDirectory;
+
+            // Usa Directory.GetParent para obter o diretório pai (DirectoryInfo)
+            DirectoryInfo? diretorioPai = Directory.GetParent(caminhoDoExecutavel);
+
+            if (diretorioPai != null) return diretorioPai.FullName;
+            else return caminhoDoExecutavel;
+        }
 
         static void Main(string[] args)
         {
             Console.WriteLine("=== Iniciando Processador de PDFs Híbrido (Nativo + OCR) ===");
 
-            string currentDir = Directory.GetCurrentDirectory();
+            string currentDir = getFatherCurrentDirectory();
             var files = Directory.GetFiles(currentDir, "*.pdf");
 
             if (files.Length == 0)
@@ -44,7 +70,6 @@ namespace RenomeadorPDF
             try
             {
                 int qtdPaginas = 0;
-                string terceiraPalavra = "NaoIdentificado";
                 string textoExtraido = ExtrairTExtoPdfNativo(filePath, out qtdPaginas);
 
                 if (String.IsNullOrEmpty(textoExtraido)) textoExtraido = ExtrairTextoPdfOcr(filePath, out qtdPaginas);
@@ -55,22 +80,33 @@ namespace RenomeadorPDF
                     return;
                 }
 
+                textoExtraido = normalizeString(textoExtraido);
+
                 if (!textoPdfAsoValida(textoExtraido))
                 {
+                    if (showLog) Console.WriteLine(" \n textoPdfAsoValida ====== \n" + textoExtraido + " \n ====== \n");
                     Console.WriteLine("   [AVISO] Pdf não reconhecido como ASO ou PRONTUARIO DIGITALIZADO .\n");
                     return;
                 }
 
-                string nomeFuncionario = ExtrairNomeFuncionario(normalizeString(textoExtraido)).ToUpper();
-                string dataAso = ExtrairDataAso(normalizeString(textoExtraido)).ToUpper();
-                string tipoAso = ExtrairTipoAso(normalizeString(textoExtraido)).ToUpper();
 
-                string inicio = qtdPaginas > 1 ? "PRONTUARIO DIGITALIZADO" : "ASO DIGITALIZADO";
+                string nomeFuncionario = ExtrairNomeFuncionario(textoExtraido).ToUpper();
+                string dataAso = ExtrairDataAso(textoExtraido).ToUpper();
+                string tipoAso = ExtrairTipoAso(textoExtraido).ToUpper();
 
-                // Monta o novo nome: {QtdPaginas}_{TerceiraPalavra}_{Data}.pdf
+                bool erroExtrairDados = false;
+
+
+                if (String.IsNullOrEmpty(nomeFuncionario) || dataAso == _SEM_DATA || tipoAso == _TIPO_ASO_INDEFINIDO)
+                {
+                    if (showLog)
+                    { Console.WriteLine("   [AVISO] Texto extraido: \n " + textoExtraido + "\n"); }
+                    erroExtrairDados = true;
+                }
+
+                string inicio = qtdPaginas > 3 ? "PRONTUARIO DIGITALIZADO" : "ASO DIGITALIZADO";
                 string dataAtual = DateTime.Now.ToString("yyyyMMdd");
-                string novoNome = $"{inicio} - {nomeFuncionario} {tipoAso} {dataAtual}.pdf";
-
+                string novoNome = $"{inicio} - {nomeFuncionario} {tipoAso} {dataAso}.pdf";
 
                 Path.GetInvalidFileNameChars().ToList().ForEach(c => { novoNome = novoNome.Replace(c, '_'); });
 
@@ -87,13 +123,20 @@ namespace RenomeadorPDF
 
                 if (filePath != novoCaminho)
                 {
+
                     File.Move(filePath, novoCaminho);
+
                     Console.WriteLine($"   RENOMEADO PARA: {Path.GetFileName(novoCaminho)}\n");
                 }
                 else
                 {
                     Console.WriteLine("   Arquivo já está com o nome correto ou não pôde ser alterado.\n");
                 }
+
+                if (erroExtrairDados)
+                { MovFileSubFolder(novoCaminho, "ERROS"); }
+                else
+                { MovFileSubFolder(novoCaminho, "PROCESSADOS"); }
 
             }
             catch (Exception ex)
@@ -102,26 +145,127 @@ namespace RenomeadorPDF
             }
         }
 
-        private static String ExtrairTipoAso(string textoExtraido)
+        private static string ExtrairTipoAso(string textoExtraido)
         {
-            return textoExtraido.Contains("Admissional".ToUpper()) ? "AMD" : "PER";
+            string texto = textoExtraido?.ToUpper() ?? "";
+
+            return texto switch
+            {
+
+                var x when x.Contains("ADMISSIONAL") => "ADM",
+                var x when x.Contains("PERIODICO") => "PER",
+                var x when x.Contains("Periódico".ToUpper()) => "PER",
+                var x when x.Contains("RETORNO") => "RT",
+                var x when x.Contains("MUDANCA") && x.Contains("FUNCAO") => "MF",
+                var x when x.Contains("DEMISSIONAL") => "DEM",
+                _ => _TIPO_ASO_INDEFINIDO // Caso não ache nenhum
+            };
         }
 
         private static string ExtrairDataAso(string textoExtraido)
         {
-            return "21112025";
+            if (string.IsNullOrEmpty(textoExtraido)) return "Texto vazio";
+
+            // 1. PRÉ-PROCESSAMENTO
+            // Remove caracteres que não ajudam na data, mantendo números, barras e pontos
+            // Mas mantemos o contexto para ver se é nascimento
+            string textoLimpo = Regex.Replace(textoExtraido, @"\s+", " ");
+
+            // 2. REGEX PARA CAPTURAR DATAS
+            // Padrão 1: Datas com separadores (13/11/2025 ou 13.11.25)
+            // Padrão 2: Datas coladas (13112025) - comum no seu Texto 1
+            // Grupo 1: Dia, Grupo 2: Mês, Grupo 3: Ano
+            string pattern = @"\b(?<dia>\d{2})[\/\.-]?(?<mes>\d{2})[\/\.-]?(?<ano>\d{4})\b";
+
+            var matches = Regex.Matches(textoLimpo, pattern);
+            var datasCandidatas = new List<DateTime>();
+
+            foreach (Match match in matches)
+            {
+                int dia = int.Parse(match.Groups["dia"].Value);
+                int mes = int.Parse(match.Groups["mes"].Value);
+                int ano = int.Parse(match.Groups["ano"].Value);
+
+                // 3. VALIDAÇÃO BÁSICA (É uma data válida?)
+                if (dia < 1 || dia > 31 || mes < 1 || mes > 12) continue;
+
+                // Tenta criar um objeto DateTime para garantir que o dia existe no mês (ex: 30/02 falharia)
+                if (DateTime.TryParse($"{dia}/{mes}/{ano}", out DateTime dataValida))
+                {
+                    // 4. FILTRAGEM DE CONTEXTO (IMPORTANTE)
+
+                    // REGRA A: Ignorar Datas Antigas (Provavelmente Nascimento)
+                    // Assumimos que um ASO válido é de no máximo 5 anos atrás.
+                    if (dataValida.Year < DateTime.Now.Year - 5) continue;
+
+                    // REGRA B: Verificar se a palavra "Nasc" ou "Nascimento" está imediatamente antes
+                    int indexMatch = match.Index;
+                    int contextoInicio = Math.Max(0, indexMatch - 20); // Olha 20 caracteres para trás
+                    string contextoAnterior = textoLimpo.Substring(contextoInicio, indexMatch - contextoInicio).ToLower();
+
+                    if (contextoAnterior.Contains("nasc")) continue;
+
+                    datasCandidatas.Add(dataValida);
+                }
+            }
+
+            // 5. SELEÇÃO DA MELHOR DATA
+            if (datasCandidatas.Count > 0)
+            {
+                // Geralmente a data do ASO aparece mais de uma vez ou no final (assinatura).
+                // A estratégia segura é pegar a data mais recente encontrada que não seja futura demais.
+                // Ou simplesmente pegar a última ocorrência válida no documento (assinatura).
+
+                string resultado = datasCandidatas.Last().ToString("ddMMyyyy");
+                if (showLog) Console.WriteLine("data: " + resultado);
+
+                if (textoExtraido.LastIndexOf(resultado) < 10) return _SEM_DATA;
+                return resultado;
+            }
+
+            return _SEM_DATA;
         }
 
         private static string ExtrairNomeFuncionario(string textoExtraido)
         {
-            return "Lucas Coutinho Bezerra";
+            if (string.IsNullOrEmpty(textoExtraido)) return String.Empty;
+
+            // 1. PRÉ-PROCESSAMENTO
+            // Remove quebras de linha e múltiplos espaços para facilitar a busca
+            string textoLimpo = Regex.Replace(textoExtraido, @"\s+", " ").Trim();
+
+
+            // 3. MONTAGEM DA REGEX
+            // Explicação da Regex:
+            // (?i)          -> Case insensitive (ignora maiúsculas/minúsculas)
+            // \b{inicio}\b  -> Encontra a palavra chave inteira (ex: "Empregado")
+            // [:\s]* -> Aceita opcionais dois pontos ou espaços após a palavra chave
+            // (?<nome>.*?)  -> CAPTURA o conteúdo (o nome) de forma não-gulosa (para o mais cedo possível)
+            // (?=\s+{fim})  -> Lookahead: Para a captura quando encontrar um espaço seguido de um gatilho de fim
+            string pattern = $"(?i)\\b{_gatilhosInicio}\\b[:\\s]*(?<nome>.*?)(?=\\s+{_gatilhosFim})";
+
+            Match match = Regex.Match(textoLimpo, pattern);
+
+            if (match.Success) return match.Groups["nome"].Value.Trim().ToUpper().Replace("NOME ", "");
+
+            return string.Empty;
         }
 
         private static bool textoPdfAsoValida(string textoExtraido)
         {
             if (string.IsNullOrEmpty(textoExtraido)) return false;
 
-            return identificadoresPdfValidos.Any(x => textoExtraido.Contains(x, StringComparison.OrdinalIgnoreCase));
+            bool isPdfValido = _identificadoresPdfValidos.Any(x => textoExtraido.Contains(x, StringComparison.OrdinalIgnoreCase));
+
+            if (!isPdfValido)
+            {
+                _identificadoresAsoValidas.ToList().ForEach(identificador =>
+                {
+                    if (textoExtraido.IndexOf(identificador, StringComparison.OrdinalIgnoreCase) <= 10) isPdfValido = true;
+                });
+            }
+
+            return isPdfValido;
 
         }
 
@@ -158,15 +302,13 @@ namespace RenomeadorPDF
                         {
                             // Se já achamos texto suficiente (ex: mais de 50 caracteres), paramos para economizar tempo
                             // (Remova este 'if' se quiser OBRIGAR a ler o arquivo inteiro mesmo já tendo a 3ª palavra)
-                            if (sbTextoOcr.Length > 300) break;
+                            if (sbTextoOcr.Length > 500) break;
 
                             var page = pdf.GetPage(i);
                             var images = page.GetImages(); // Pega TODAS as imagens da página
 
                             if (images.Count() > 0)
                             {
-                                Console.WriteLine($"     -> Processando pág {i} ({images.Count()} imagens)...");
-
                                 foreach (var image in images)
                                 {
                                     try
@@ -216,6 +358,26 @@ namespace RenomeadorPDF
                                 .ToArray().Aggregate((a, b) => a + " " + b);
 
             return texto;
+        }
+
+        private static bool MovFileSubFolder(string sourceFilePath, string destinationFolder)
+        {
+            try
+            {
+                if (!Directory.Exists(destinationFolder))
+                    Directory.CreateDirectory(destinationFolder);
+
+                string fileName = Path.GetFileName(sourceFilePath);
+                string destFilePath = Path.Combine(destinationFolder, fileName);
+                File.Move(sourceFilePath, destFilePath);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"   [ERRO] Não foi possível mover o arquivo: {ex.Message}\n");
+                return false;
+            }
+
         }
 
     }
